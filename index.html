@@ -219,6 +219,19 @@
   .btn.rupture:active{background:var(--olive-moyen);}
   .choice-btn.erosion-forte.selected{border-color:var(--ruine);background:var(--ruine);}
   .seg-length{font-size:10px;font-weight:400;opacity:.75;}
+
+  /* Cible fixe au centre de la carte — la carte glisse dessous */
+  .crosshair{position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);
+    z-index:600;pointer-events:none;width:44px;height:44px;}
+  .ch-ring{position:absolute;inset:8px;border:2.5px solid #B8433A;border-radius:50%;
+    box-shadow:0 0 0 1.5px rgba(255,255,255,.9), inset 0 0 0 1.5px rgba(255,255,255,.9);}
+  .ch-h,.ch-v{position:absolute;background:#B8433A;box-shadow:0 0 0 1px rgba(255,255,255,.9);}
+  .ch-h{top:50%;left:0;right:0;height:2px;transform:translateY(-50%);}
+  .ch-v{left:50%;top:0;bottom:0;width:2px;transform:translateX(-50%);}
+  .gps-center-btn{position:absolute;bottom:10px;left:8px;z-index:600;
+    background:rgba(255,255,255,.95);border:none;border-radius:8px;padding:7px 10px;
+    font-size:12px;font-weight:700;color:var(--pierre);box-shadow:0 1px 4px rgba(0,0,0,.25);}
+  .gps-center-btn:active{background:var(--olive-moyen);color:#fff;}
   .inline-map-controls{position:absolute;top:8px;right:8px;z-index:500;display:flex;gap:6px;
     background:rgba(255,255,255,.9);border-radius:8px;padding:4px;box-shadow:0 1px 4px rgba(0,0,0,.2);}
   .map-layer-btn{font-size:11px;font-weight:700;padding:5px 9px;border:none;border-radius:6px;
@@ -392,6 +405,13 @@
       <div class="minimap-wrap" id="miniMapWrap">
         <div class="minimap-empty" id="miniMapEmpty">Le tracé du mur s'affichera ici au fur et à mesure du relevé.</div>
         <div id="inlineMap" class="inline-map" style="display:none;"></div>
+        <div id="crosshair" class="crosshair" style="display:none;">
+          <div class="ch-ring"></div>
+          <div class="ch-h"></div>
+          <div class="ch-v"></div>
+        </div>
+        <button type="button" id="gpsCenterBtn" class="gps-center-btn" style="display:none;"
+          onclick="centerOnGPS()" title="Centrer sur ma position GPS">🎯 Ma position</button>
         <div id="inlineMapControls" class="inline-map-controls" style="display:none;">
           <button type="button" class="map-layer-btn active" id="btnPlan" onclick="setInlineBasemap('plan')">Plan IGN</button>
           <button type="button" class="map-layer-btn" id="btnOrtho" onclick="setInlineBasemap('ortho')">Photo aérienne</button>
@@ -675,6 +695,7 @@ function toggleTracking(){
 function startTracking(){
   if(!navigator.geolocation){ toast('GPS non disponible sur cet appareil'); return; }
   tracking = true;
+  if(leafletMap) leafletMap._userPanned = false;  // reprendre le suivi automatique de la vue
   document.getElementById('gpsBox').classList.add('tracking');
   document.getElementById('trackBtn').style.display = 'none';
   document.getElementById('addPointBtn').style.display = 'block';
@@ -683,6 +704,8 @@ function startTracking(){
   document.getElementById('undoPointBtn').style.display = currentWall.points.length>0 ? 'block':'none';
   document.getElementById('resumeBtn').style.display = 'none';
   document.getElementById('lengthBanner').style.display = 'none';
+
+  renderMiniMap();   // afficher la carte + cible immédiatement, même sans point
 
   watchId = navigator.geolocation.watchPosition(pos=>{
     updateGpsStatus(true);
@@ -718,6 +741,7 @@ function finishTracking(){
   document.getElementById('undoPointBtn').style.display = currentWall.points.length>0 ? 'block':'none';
   document.getElementById('resumeBtn').style.display = 'block';
   showLengthBanner();
+  renderMiniMap();   // met à jour cible/déplaçabilité selon le nouvel état
   if(currentWall.points.length < 2){
     toast('Relevé terminé — ajoutez au moins 2 points pour une longueur');
   } else {
@@ -752,12 +776,47 @@ function showLengthBanner(){
   }
 }
 
+/* Recentre la carte sur la position GPS actuelle (bouton 🎯 Ma position). */
+function centerOnGPS(){
+  const apply = (lat, lon, acc)=>{
+    if(leafletMap){
+      leafletMap.setView([lat, lon], Math.max(leafletMap.getZoom(), 19));
+      leafletMap._userPanned = true; // l'utilisateur pilote la vue, pas l'auto-suivi
+      toast(acc!=null ? `Centré sur votre position (±${Math.round(acc)} m)` : 'Centré sur votre position');
+    }
+  };
+  if(lastRawPos){
+    apply(lastRawPos.coords.latitude, lastRawPos.coords.longitude, lastRawPos.coords.accuracy);
+    return;
+  }
+  if(!navigator.geolocation){ toast('GPS non disponible'); return; }
+  navigator.geolocation.getCurrentPosition(
+    pos=>{ lastRawPos = pos; apply(pos.coords.latitude, pos.coords.longitude, pos.coords.accuracy); },
+    ()=>toast('Position GPS indisponible'),
+    {enableHighAccuracy:true, timeout:8000}
+  );
+}
+
+/* Position de placement : la cible (centre de la carte) si la carte est là,
+   sinon la dernière position GPS. */
+function placementPosition(){
+  if(leafletMap){
+    const c = leafletMap.getCenter();
+    return {lat:c.lat, lon:c.lng, acc:null, viaCible:true};
+  }
+  if(lastRawPos){
+    const {latitude, longitude, accuracy} = lastRawPos.coords;
+    return {lat:latitude, lon:longitude, acc:accuracy, viaCible:false};
+  }
+  return null;
+}
+
 function addManualPoint(){
-  if(!lastRawPos){ toast('Position pas encore disponible'); return; }
-  const {latitude, longitude, accuracy} = lastRawPos.coords;
-  currentWall.points.push({lat:latitude, lon:longitude, acc:accuracy, t:Date.now(), manual:true});
+  const pos = placementPosition();
+  if(!pos){ toast('Position pas encore disponible'); return; }
+  currentWall.points.push({lat:pos.lat, lon:pos.lon, acc:pos.acc, t:Date.now(), manual:true});
   refreshPointCount();
-  toast('Point ajouté');
+  toast(pos.viaCible ? 'Point posé à la cible' : 'Point ajouté (GPS)');
 }
 
 function refreshPointCount(){
@@ -963,15 +1022,21 @@ function renderMiniMap(){
   const controls = document.getElementById('inlineMapControls');
   const hint = document.getElementById('inlineMapHint');
   const credit = document.getElementById('ignCredit');
+  const ch = document.getElementById('crosshair');
+  const gpsBtn = document.getElementById('gpsCenterBtn');
   const hasPts = currentWall && currentWall.points.length > 0;
+  // la carte s'affiche dès qu'un relevé est actif (pour placer le 1er point à la cible)
+  const showMap = hasPts || tracking;
 
-  if(!hasPts){
+  if(!showMap){
     if(empty) empty.style.display = 'block';
     if(mapDiv) mapDiv.style.display = 'none';
     if(controls) controls.style.display = 'none';
     if(hint) hint.style.display = 'none';
     if(credit) credit.style.display = 'none';
-    if(leafletMap){ leafletMap.remove(); leafletMap = null; }
+    if(ch) ch.style.display = 'none';
+    if(gpsBtn) gpsBtn.style.display = 'none';
+    destroyInlineMap();
     return;
   }
 
@@ -981,8 +1046,9 @@ function renderMiniMap(){
     if(controls) controls.style.display = 'none';
     if(hint) hint.style.display = 'none';
     if(credit) credit.style.display = 'none';
+    if(ch) ch.style.display = 'none';
+    if(gpsBtn) gpsBtn.style.display = 'none';
     if(mapDiv){ mapDiv.style.display = 'none'; }
-    // injecter le SVG directement dans le wrap
     const wrap = document.getElementById('miniMapWrap');
     let svgHolder = document.getElementById('svgFallbackHolder');
     if(!svgHolder){
@@ -999,17 +1065,86 @@ function renderMiniMap(){
   if(controls) controls.style.display = 'flex';
   if(hint) hint.style.display = 'block';
   if(credit) credit.style.display = 'block';
+  // La cible et le bouton GPS n'apparaissent qu'en mode saisie
+  // (mur pas encore enregistré, ou relevé actif) — quand les points ne sont pas déplaçables.
+  const placementMode = (editingId === null) || tracking;
+  if(ch) ch.style.display = placementMode ? 'block' : 'none';
+  if(gpsBtn) gpsBtn.style.display = placementMode ? 'block' : 'none';
 
-  // (ré)initialiser la carte inline
-  setTimeout(()=>{
-    if(!leafletMap){
-      leafletMap = L.map(mapDiv, {zoomControl:true, attributionControl:false});
-      inlineBasemapLayer = basemapLayer(currentBasemap).addTo(leafletMap);
-    }
+  ensureInlineMap();   // crée la carte si besoin, puis dessine le tracé
+}
+
+/* Détruit proprement la carte inline (évite "Map container is already initialized"). */
+function destroyInlineMap(){
+  if(leafletMap){
+    try{ leafletMap.remove(); }catch(e){}
+    leafletMap = null;
+    inlineBasemapLayer = null;
+    leafletMarkers = [];
+    leafletSegLines = [];
+    leafletPolyline = null;
+    leafletCasing = null;
+  }
+  const mapDiv = document.getElementById('inlineMap');
+  if(mapDiv){ mapDiv.innerHTML = ''; delete mapDiv._leaflet_id; }
+}
+
+/* Crée la carte si elle n'existe pas, puis (re)dessine toujours le tracé. */
+let inlineMapPending = false;
+function ensureInlineMap(){
+  const mapDiv = document.getElementById('inlineMap');
+  if(!mapDiv) return;
+
+  if(leafletMap){
+    // carte déjà là : on se contente de redessiner le tracé
     drawWallOnMap(leafletMap);
-    fitMap(leafletMap);
+    // pendant un relevé actif, garder le tracé dans la vue
+    // (sauf si l'utilisateur a déplacé la carte à la main)
+    if(tracking && !leafletMap._userPanned){
+      fitMap(leafletMap);
+    }
     leafletMap.invalidateSize();
-  }, 50);
+    return;
+  }
+  if(inlineMapPending) return;   // création déjà programmée
+  inlineMapPending = true;
+
+  // laisser le conteneur prendre ses dimensions avant d'initialiser Leaflet
+  setTimeout(()=>{
+    inlineMapPending = false;
+    if(leafletMap) { drawWallOnMap(leafletMap); return; }
+    if(!currentWall) return;
+    try{
+      delete mapDiv._leaflet_id;   // sécurité si un ancien conteneur traîne
+      leafletMap = L.map(mapDiv, {zoomControl:true, attributionControl:false});
+      ensureWallPane(leafletMap);
+      // si l'utilisateur déplace la carte à la main, on cesse de recentrer automatiquement
+      leafletMap.on('dragstart zoomstart', ()=>{ leafletMap._userPanned = true; });
+      inlineBasemapLayer = basemapLayer(currentBasemap).addTo(leafletMap);
+      // vue initiale : 1er point si le tracé existe, sinon la position GPS
+      if(currentWall.points.length > 0){
+        const p0 = currentWall.points[0];
+        leafletMap.setView([p0.lat, p0.lon], 19);
+        drawWallOnMap(leafletMap);
+        fitMap(leafletMap);
+      } else if(lastRawPos){
+        leafletMap.setView([lastRawPos.coords.latitude, lastRawPos.coords.longitude], 19);
+      } else {
+        // pas encore de GPS : vue neutre sur la commune, le bouton 🎯 recadrera
+        leafletMap.setView([43.876, 3.789], 15); // Ferrières-les-Verreries
+        navigator.geolocation && navigator.geolocation.getCurrentPosition(
+          pos=>{ lastRawPos = pos;
+            if(leafletMap && !leafletMap._userPanned && currentWall.points.length===0){
+              leafletMap.setView([pos.coords.latitude, pos.coords.longitude], 19);
+            }
+          }, ()=>{}, {enableHighAccuracy:true, timeout:8000});
+      }
+      leafletMap.invalidateSize();
+    }catch(err){
+      console.error('Init carte inline :', err);
+      destroyInlineMap();
+    }
+  }, 80);
 }
 
 function setInlineBasemap(kind){
@@ -1036,42 +1171,66 @@ function markerIcon(i, p){
 
 /* Dessine le tracé multicolore (une polyligne par tronçon) + points déplaçables. */
 let leafletSegLines = [];
+/* Pane dédié aux lignes du mur : garanti AU-DESSUS des tuiles du fond de carte.
+   Sans cela, sur certains mobiles, les tuiles chargées après coup recouvrent
+   les tracés (les marqueurs, eux, vivent dans un pane toujours supérieur). */
+function ensureWallPane(map){
+  if(!map.getPane('wallPane')){
+    map.createPane('wallPane');
+    map.getPane('wallPane').style.zIndex = 450; // tuiles=200, overlay=400, markers=600
+    map.getPane('wallPane').style.pointerEvents = 'auto';
+  }
+}
+
 function drawWallOnMap(map){
-  leafletMarkers.forEach(m=>map.removeLayer(m));
-  leafletMarkers = [];
-  leafletSegLines.forEach(l=>map.removeLayer(l));
-  leafletSegLines = [];
-  if(leafletPolyline){ map.removeLayer(leafletPolyline); leafletPolyline = null; }
-  if(leafletCasing){ map.removeLayer(leafletCasing); leafletCasing = null; }
+  if(!map || !currentWall) return;
+
+  // Les couches sont mémorisées SUR la carte elle-même : deux cartes peuvent
+  // coexister (encart + plein écran) sans se marcher dessus.
+  if(!map._wallLayers) map._wallLayers = [];
+  map._wallLayers.forEach(l=>{ try{ map.removeLayer(l); }catch(e){} });
+  map._wallLayers = [];
 
   syncSegments();
+  const pts = currentWall.points;
+  if(pts.length === 0) return;
+
   const ranges = segmentPointRanges();
 
   // liseré blanc continu sous l'ensemble (contraste sur fond chargé)
-  const allLatLngs = currentWall.points.map(p=>[p.lat,p.lon]);
-  if(allLatLngs.length >= 2){
-    leafletCasing = L.polyline(allLatLngs, {color:'#FFFFFF', weight:9, opacity:0.9,
-      lineJoin:'round', lineCap:'round'}).addTo(map);
-    leafletSegLines.push(leafletCasing);
+  if(pts.length >= 2){
+    const casing = L.polyline(pts.map(p=>[p.lat,p.lon]), {color:'#FFFFFF', weight:9,
+      opacity:0.9, lineJoin:'round', lineCap:'round', pane:'wallPane'}).addTo(map);
+    map._wallLayers.push(casing);
+    map._casing = casing;
+  } else {
+    map._casing = null;
   }
 
   // une polyligne colorée par tronçon
-  ranges.forEach((pts, i)=>{
-    if(pts.length < 2) return;
+  map._segLines = [];
+  ranges.forEach((rpts, i)=>{
+    if(rpts.length < 2) return;
     const seg = currentWall.segments[i] || {};
     const color = stateColor(seg.etat);
     const isActive = (i === activeSegIdx);
-    const line = L.polyline(pts.map(p=>[p.lat,p.lon]), {
+    const line = L.polyline(rpts.map(p=>[p.lat,p.lon]), {
       color: color, weight: isActive ? 7 : 5, opacity: 1,
-      lineJoin:'round', lineCap:'round'
+      lineJoin:'round', lineCap:'round', pane:'wallPane'
     }).addTo(map);
     line.on('click', ()=>{ activeSegIdx = i; renderSegments(); redrawWallOnActiveMaps(); });
-    leafletSegLines.push(line);
+    map._wallLayers.push(line);
+    map._segLines.push(line);
   });
 
   // points déplaçables (les ruptures sont marquées différemment)
-  currentWall.points.forEach((p, i)=>{
-    const m = L.marker([p.lat, p.lon], {icon:markerIcon(i, p), draggable:true, zIndexOffset:1000});
+  // Règle d'ergonomie : pendant la saisie (mur pas encore enregistré, ou relevé actif),
+  // les points ne se déplacent PAS — c'est la carte qui bouge sous la cible.
+  // Le glissement des points n'est possible qu'en rouvrant un mur enregistré.
+  const canDrag = (editingId !== null) && !tracking;
+  pts.forEach((p, i)=>{
+    const m = L.marker([p.lat, p.lon], {icon:markerIcon(i, p), draggable:canDrag,
+      interactive:canDrag, zIndexOffset:1000});
     m.addTo(map);
     m._idx = i;
     m.on('dragstart', e=>{
@@ -1088,28 +1247,31 @@ function drawWallOnMap(map){
     m.on('dragend', e=>{
       const el = e.target.getElement();
       if(el && el.firstChild) el.firstChild.classList.remove('dragging');
-      onWallGeometryEdited(); drawWallOnMap(map);
+      onWallGeometryEdited();
+      drawWallOnMap(map);
     });
     m.on('mousedown touchstart', ()=>{
+      if(!canDrag) return;  // pendant la saisie, aucun geste sur les points
       editorLongPressTimer = setTimeout(()=>removeMapPoint(m._idx, map), 650);
     });
     m.on('mouseup touchend dragstart', ()=>{
       if(editorLongPressTimer){ clearTimeout(editorLongPressTimer); editorLongPressTimer=null; }
     });
-    leafletMarkers.push(m);
+    map._wallLayers.push(m);
   });
 }
 
 /* Mise à jour légère des lignes pendant qu'on glisse un point. */
 function updateLinesLive(map){
+  if(!map) return;
   const all = currentWall.points.map(p=>[p.lat,p.lon]);
-  if(leafletCasing) leafletCasing.setLatLngs(all);
+  if(map._casing) map._casing.setLatLngs(all);
   const ranges = segmentPointRanges();
-  let li = leafletCasing ? 1 : 0;   // les lignes de tronçons suivent le liseré
-  ranges.forEach((pts)=>{
-    if(pts.length < 2) return;
-    const line = leafletSegLines[li++];
-    if(line && line.setLatLngs) line.setLatLngs(pts.map(p=>[p.lat,p.lon]));
+  let li = 0;
+  ranges.forEach((rpts)=>{
+    if(rpts.length < 2) return;
+    const line = (map._segLines||[])[li++];
+    if(line && line.setLatLngs) line.setLatLngs(rpts.map(p=>[p.lat,p.lon]));
   });
 }
 
@@ -1164,13 +1326,21 @@ function openMapEditor(){
 
   setTimeout(()=>{
     const mapDiv = document.getElementById('leafletMap');
-    if(fsMap){ fsMap.remove(); fsMap = null; }
+    if(fsMap){ try{ fsMap.remove(); }catch(e){} fsMap = null; }
     mapDiv.innerHTML = '';
-    fsMap = L.map(mapDiv, {zoomControl:true, attributionControl:false});
-    fsBasemapLayer = basemapLayer(currentBasemap).addTo(fsMap);
-    drawWallOnMap(fsMap);   // même mur, mêmes points : édition partagée
-    fitMap(fsMap);
-    fsMap.invalidateSize();
+    delete mapDiv._leaflet_id;
+    try{
+      fsMap = L.map(mapDiv, {zoomControl:true, attributionControl:false});
+      ensureWallPane(fsMap);
+      fsBasemapLayer = basemapLayer(currentBasemap).addTo(fsMap);
+      const p0 = currentWall.points[0];
+      fsMap.setView([p0.lat, p0.lon], 19);
+      drawWallOnMap(fsMap);   // même mur, mêmes points : édition partagée
+      fitMap(fsMap);
+      fsMap.invalidateSize();
+    }catch(err){
+      console.error('Init carte plein écran :', err);
+    }
   }, 60);
 }
 
@@ -1471,11 +1641,11 @@ let activeSegIdx = 0;   // tronçon actuellement affiché dans le panneau
 /* Pose une rupture à la position courante : ferme le tronçon en cours,
    en ouvre un nouveau qui hérite des caractéristiques du précédent. */
 function addRupture(){
-  if(!lastRawPos){ toast('Position pas encore disponible'); return; }
-  const {latitude, longitude, accuracy} = lastRawPos.coords;
+  const pos = placementPosition();
+  if(!pos){ toast('Position pas encore disponible'); return; }
   // le point de rupture est un point normal marqué rupture:true
   currentWall.points.push({
-    lat:latitude, lon:longitude, acc:accuracy, t:Date.now(), manual:true, rupture:true
+    lat:pos.lat, lon:pos.lon, acc:pos.acc, t:Date.now(), manual:true, rupture:true
   });
   syncSegments();                                  // crée le nouveau tronçon (hérite du précédent)
   activeSegIdx = currentWall.segments.length - 1;  // on bascule dessus
