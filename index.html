@@ -193,7 +193,10 @@
   /* Mini-carte SVG dans la fiche */
   .minimap-wrap{background:var(--parchemin);border:1px solid var(--filet);border-radius:10px;
     overflow:hidden;margin-bottom:8px;position:relative;}
-  .minimap-wrap svg{display:block;width:100%;height:auto;}
+  /* Cette règle ne doit s'appliquer QU'AU SVG de repli hors-ligne.
+     Appliquée à tous les svg du conteneur, elle écrasait à 0×0 le rendu SVG
+     interne de Leaflet (panes de taille nulle) : tracés dessinés mais invisibles. */
+  #svgFallbackHolder svg{display:block;width:100%;height:auto;}
   .minimap-empty{padding:30px 14px;text-align:center;color:var(--gris);font-size:13px;}
   .inline-map{width:100%;height:300px;background:#dfe0d5;}
   /* Neutralise totalement l'attribution Leaflet par défaut (drapeau Ukraine inclus) */
@@ -711,6 +714,12 @@ function startTracking(){
     updateGpsStatus(true);
     lastRawPos = pos;
     const {latitude, longitude, accuracy} = pos.coords;
+    // la cible suit la position : recentrage continu, sauf si l'utilisateur
+    // a déplacé la carte à la main (le bouton 🎯 réactive le suivi)
+    if(leafletMap && !leafletMap._userPanned){
+      leafletMap.setView([latitude, longitude],
+        Math.max(leafletMap.getZoom(), 19), {animate:false});
+    }
     const pts = currentWall.points;
     const last = pts[pts.length-1];
     // auto-ajout si pas de dernier point ou distance > 4m : chaque point est relié au précédent
@@ -780,9 +789,9 @@ function showLengthBanner(){
 function centerOnGPS(){
   const apply = (lat, lon, acc)=>{
     if(leafletMap){
-      leafletMap.setView([lat, lon], Math.max(leafletMap.getZoom(), 19));
-      leafletMap._userPanned = true; // l'utilisateur pilote la vue, pas l'auto-suivi
-      toast(acc!=null ? `Centré sur votre position (±${Math.round(acc)} m)` : 'Centré sur votre position');
+      leafletMap.setView([lat, lon], Math.max(leafletMap.getZoom(), 19), {animate:false});
+      leafletMap._userPanned = false; // réactive le suivi automatique de la cible
+      toast(acc!=null ? `Suivi de position réactivé (±${Math.round(acc)} m)` : 'Suivi de position réactivé');
     }
   };
   if(lastRawPos){
@@ -1098,11 +1107,6 @@ function ensureInlineMap(){
   if(leafletMap){
     // carte déjà là : on se contente de redessiner le tracé
     drawWallOnMap(leafletMap);
-    // pendant un relevé actif, garder le tracé dans la vue
-    // (sauf si l'utilisateur a déplacé la carte à la main)
-    if(tracking && !leafletMap._userPanned){
-      fitMap(leafletMap);
-    }
     leafletMap.invalidateSize();
     return;
   }
