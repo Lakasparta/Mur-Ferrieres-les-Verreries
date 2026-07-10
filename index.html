@@ -247,6 +247,8 @@
   /* Carte globale */
   #mapCanvas{width:100%;background:var(--parchemin);border:1px solid var(--filet);border-radius:10px;}
   .map-legend{display:flex;gap:14px;flex-wrap:wrap;font-size:11px;margin-top:10px;color:var(--pierre);}
+  .global-map-wrap{position:relative;border:1px solid var(--filet);border-radius:10px;overflow:hidden;}
+  .global-leaflet-map{width:100%;height:62vh;min-height:340px;background:#dfe0d5;}
   .map-legend .li{display:flex;align-items:center;gap:5px;}
   .map-legend .sw{width:16px;height:4px;border-radius:2px;}
   .map-note{font-size:11px;color:var(--gris);margin-top:8px;line-height:1.4;}
@@ -327,7 +329,16 @@
       </div>
     </header>
     <main style="padding-bottom:120px;">
-      <div id="mapContainer"></div>
+      <div class="global-map-wrap" id="globalMapWrap">
+        <div id="globalLeafletMap" class="global-leaflet-map" style="display:none;"></div>
+        <div id="globalMapControls" class="inline-map-controls" style="display:none;">
+          <button type="button" class="map-layer-btn active" id="gBtnPlan" onclick="setGlobalBasemap('plan')">Plan IGN</button>
+          <button type="button" class="map-layer-btn" id="gBtnOrtho" onclick="setGlobalBasemap('ortho')">Photo aérienne</button>
+          <button type="button" class="map-layer-btn" id="gBtnCadastre" onclick="setGlobalBasemap('cadastre')">Cadastre</button>
+        </div>
+        <div id="mapContainer"></div>
+      </div>
+      <div class="ign-credit" id="globalIgnCredit" style="display:none;">Fonds : IGN-F / Géoportail</div>
       <div class="map-legend">
         <div class="li"><span class="sw" style="background:var(--bon)"></span>Bon</div>
         <div class="li"><span class="sw" style="background:var(--degrade)"></span>Dégradé</div>
@@ -335,8 +346,7 @@
         <div class="li"><span class="sw" style="background:var(--gris)"></span>Non renseigné</div>
         <div class="li"><span class="sw" style="background:repeating-linear-gradient(90deg,#8A8A78 0 5px,transparent 5px 9px)"></span>Candidat (à vérifier)</div>
       </div>
-      <p class="map-note">Vue schématique autonome (sans réseau), nord en haut, échelle en mètres. <strong>Touchez un tracé pour ouvrir la fiche du mur.</strong> Un fond cartographique pourra s'ajouter une fois l'appli hébergée en ligne.</p>
-      <button class="btn secondary" onclick="tryLoadBasemap()" style="margin-top:10px;">🌍 Charger un fond de carte (réseau requis)</button>
+      <p class="map-note"><strong>Touchez un tracé pour ouvrir la fiche du mur.</strong> Le fond de carte s'affiche quand il y a du réseau ; hors ligne, une vue schématique à l'échelle prend le relais.</p>
     </main>
   </div>
 
@@ -566,6 +576,11 @@ function loadWalls(){
 /* Migration : les murs enregistrés avant la refonte ont des attributs globaux
    (etat, ownership, souttenement...). On les convertit en un tronçon unique. */
 function migrateWall(w){
+  // champs indispensables, quel que soit l'âge ou l'origine du mur (import inclus)
+  if(!Array.isArray(w.photos)) w.photos = [];
+  if(!Array.isArray(w.points)) w.points = [];
+  if(!w.angles) w.angles = {low:null, high:null};
+  if(w.notes == null) w.notes = '';
   if(w.segments && Array.isArray(w.segments) && w.segments.length){
     return w; // déjà au nouveau format
   }
@@ -721,11 +736,15 @@ function startTracking(){
         Math.max(leafletMap.getZoom(), 19), {animate:false});
     }
     const pts = currentWall.points;
-    const last = pts[pts.length-1];
-    // auto-ajout si pas de dernier point ou distance > 4m : chaque point est relié au précédent
-    if(!last || haversine(last.lat,last.lon,latitude,longitude) > 4){
-      pts.push({lat:latitude, lon:longitude, acc:accuracy, t:Date.now(), manual:false});
-      refreshPointCount();
+    // Le PREMIER point appartient à l'utilisateur : il le pose à la cible,
+    // après avoir affiné la position. Aucun auto-ajout avant cela.
+    if(pts.length > 0){
+      const last = pts[pts.length-1];
+      // auto-ajout si distance > 4m : chaque point est relié au précédent
+      if(haversine(last.lat,last.lon,latitude,longitude) > 4){
+        pts.push({lat:latitude, lon:longitude, acc:accuracy, t:Date.now(), manual:false});
+        refreshPointCount();
+      }
     }
   }, err=>{
     updateGpsStatus(false);
@@ -2105,15 +2124,121 @@ showScreen = function(id){
   else { tabbar.style.display = 'flex'; }
 };
 
-/* ============ CARTE GLOBALE (SVG autonome) ============ */
-let basemapLoaded = false;
+/* ============ CARTE GLOBALE ============ */
+let globalMap = null;
+
+function setGlobalBasemap(kind){
+  currentBasemap = kind;   // partagé avec la carte de saisie
+  ['plan','ortho','cadastre'].forEach(k=>{
+    const btn = document.getElementById('gBtn'+k.charAt(0).toUpperCase()+k.slice(1));
+    if(btn) btn.classList.toggle('active', k===kind);
+  });
+  if(globalMap && globalMap._basemapLayer){
+    globalMap.removeLayer(globalMap._basemapLayer);
+    globalMap._basemapLayer = basemapLayer(kind).addTo(globalMap);
+  }
+}
+
 function renderGlobalMap(){
+  const leafDiv = document.getElementById('globalLeafletMap');
+  const controls = document.getElementById('globalMapControls');
+  const credit = document.getElementById('globalIgnCredit');
   const container = document.getElementById('mapContainer');
   const withPoints = walls.filter(w=>w.points && w.points.length>0);
+
   if(withPoints.length === 0){
+    if(leafDiv) leafDiv.style.display='none';
+    if(controls) controls.style.display='none';
+    if(credit) credit.style.display='none';
     container.innerHTML = '<div class="minimap-empty" style="padding:50px 14px;">Aucun tracé à afficher.<br>Relevez au moins un mur avec des points GPS.</div>';
     return;
   }
+
+  // Leaflet disponible : vraie carte avec fond IGN
+  if(leafletAvailable()){
+    container.innerHTML = '';
+    leafDiv.style.display = 'block';
+    controls.style.display = 'flex';
+    credit.style.display = 'block';
+    // synchroniser les boutons avec le fond courant
+    ['plan','ortho','cadastre'].forEach(k=>{
+      const btn = document.getElementById('gBtn'+k.charAt(0).toUpperCase()+k.slice(1));
+      if(btn) btn.classList.toggle('active', k===currentBasemap);
+    });
+    setTimeout(()=>{
+      if(!globalMap){
+        try{
+          delete leafDiv._leaflet_id;
+          globalMap = L.map(leafDiv, {zoomControl:true, attributionControl:false});
+          ensureWallPane(globalMap);
+          globalMap._basemapLayer = basemapLayer(currentBasemap).addTo(globalMap);
+        }catch(err){ console.error('Init carte globale :', err); globalMap = null; return; }
+      }
+      drawAllWallsOnGlobalMap();
+      // cadrage sur l'ensemble des tracés
+      const all = [];
+      withPoints.forEach(w=> w.points.forEach(p=> all.push([p.lat, p.lon])));
+      if(all.length === 1) globalMap.setView(all[0], 19);
+      else globalMap.fitBounds(all, {padding:[30,30], maxZoom:19});
+      globalMap.invalidateSize();
+    }, 60);
+    return;
+  }
+
+  // Repli hors ligne : vue schématique SVG (comme avant)
+  leafDiv.style.display='none';
+  controls.style.display='none';
+  credit.style.display='none';
+  renderGlobalMapSVG(container, withPoints);
+}
+
+/* Dessine tous les murs sur la carte globale Leaflet : tronçons colorés,
+   candidats en pointillés gris, tracé cliquable pour ouvrir la fiche. */
+function drawAllWallsOnGlobalMap(){
+  if(!globalMap._layers2) globalMap._layers2 = [];
+  globalMap._layers2.forEach(l=>{ try{ globalMap.removeLayer(l); }catch(e){} });
+  globalMap._layers2 = [];
+
+  walls.filter(w=>w.points && w.points.length>0).forEach(wl=>{
+    const wm = migrateWall(wl);
+    const isCandidate = wm.statut === 'candidat';
+    if(wm.points.length === 1){
+      const color = isCandidate ? '#8A8A78' : stateColor((wm.segments[0]||{}).etat);
+      const c = L.circleMarker([wm.points[0].lat, wm.points[0].lon],
+        {radius:7, color:'#fff', weight:2, fillColor:color, fillOpacity:1, pane:'wallPane'}).addTo(globalMap);
+      c.on('click', ()=>openWall(wm.id));
+      globalMap._layers2.push(c);
+      return;
+    }
+    // liseré blanc continu
+    const casing = L.polyline(wm.points.map(p=>[p.lat,p.lon]),
+      {color:'#FFFFFF', weight:8, opacity:0.85, lineJoin:'round', lineCap:'round', pane:'wallPane'}).addTo(globalMap);
+    globalMap._layers2.push(casing);
+    // un trait par tronçon
+    segmentRangesFor(wm).forEach((rpts, si)=>{
+      if(rpts.length < 2) return;
+      const seg = (wm.segments||[])[si] || {};
+      const color = isCandidate ? '#8A8A78' : stateColor(seg.etat);
+      const line = L.polyline(rpts.map(p=>[p.lat,p.lon]), {
+        color:color, weight:4.5, opacity:0.95, lineJoin:'round', lineCap:'round',
+        dashArray: isCandidate ? '6 5' : null, pane:'wallPane'
+      }).addTo(globalMap);
+      line.on('click', ()=>openWall(wm.id));
+      globalMap._layers2.push(line);
+    });
+    // étiquette du nom au premier point
+    const label = L.marker([wm.points[0].lat, wm.points[0].lon], {
+      icon: L.divIcon({className:'', html:`<div style="font-size:10px;font-weight:700;color:#4A4035;
+        text-shadow:0 0 3px #fff,0 0 3px #fff;white-space:nowrap;transform:translate(8px,-14px);">${escapeXml(shortLabel(wm))}</div>`,
+        iconSize:[0,0]}),
+      interactive:false
+    }).addTo(globalMap);
+    globalMap._layers2.push(label);
+  });
+}
+
+/* Vue schématique SVG (repli hors ligne uniquement). */
+function renderGlobalMapSVG(container, withPoints){
   // rassembler tous les points pour un cadrage commun
   const allPts = [];
   withPoints.forEach(w=> w.points.forEach(p=> allPts.push(p)));
@@ -2180,11 +2305,6 @@ function escapeXml(s){
   return (s||'').replace(/[<>&'"]/g, c=>({'<':'&lt;','>':'&gt;','&':'&amp;',"'":'&apos;','"':'&quot;'}[c]));
 }
 
-function tryLoadBasemap(){
-  toast('Fond de carte : nécessite réseau + hébergement https');
-  // Volontairement non implémenté en offline : un fond de tuiles (Leaflet/OSM) exige le réseau
-  // et des scripts externes. À activer une fois l'appli hébergée en https si besoin.
-}
 
 /* ============ INVENTAIRE ============ */
 function renderInventory(){
@@ -2385,4 +2505,5 @@ runGpsDiagnostic();
 offerDraftRecovery();
 </script>
 </body>
+</html>
 </html>
