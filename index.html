@@ -403,7 +403,7 @@
           <span id="lastPrecisionTag"></span>
         </div>
         <button class="btn primary" id="trackBtn" onclick="toggleTracking()">▶ Démarrer le relevé</button>
-        <p class="hint" id="gpsHint">Marchez le long du mur en tenant le téléphone : un point est ajouté automatiquement tous les quelques mètres et relié au précédent. Aux angles et aux extrémités, appuyez sur « Ajouter point » pour un point précis.</p>
+        <p class="hint" id="gpsHint">La carte suit votre position : la cible reste sur vous en marchant. Affinez au pincement si besoin, puis « Ajouter point » pose un point à la cible, relié au précédent. « Nouvelle rupture » quand l'état du mur change.</p>
         <button class="btn secondary" id="addPointBtn" onclick="addManualPoint()" style="display:none;">📍 Ajouter point ici</button>
         <button class="btn rupture" id="ruptureBtn" onclick="addRupture()" style="display:none;">✂️ Nouvelle rupture ici (l'état change)</button>
         <button class="btn secondary" id="finishBtn" onclick="finishTracking()" style="display:none;">✓ Terminer le relevé</button>
@@ -728,23 +728,13 @@ function startTracking(){
   watchId = navigator.geolocation.watchPosition(pos=>{
     updateGpsStatus(true);
     lastRawPos = pos;
-    const {latitude, longitude, accuracy} = pos.coords;
-    // la cible suit la position : recentrage continu, sauf si l'utilisateur
-    // a déplacé la carte à la main (le bouton 🎯 réactive le suivi)
+    const {latitude, longitude} = pos.coords;
+    // Le GPS ne pose AUCUN point : il fait seulement suivre la cible sur votre
+    // position (sauf si vous avez déplacé la carte — 🎯 réactive le suivi).
+    // Tous les points sont posés par vous, à la cible.
     if(leafletMap && !leafletMap._userPanned){
       leafletMap.setView([latitude, longitude],
         Math.max(leafletMap.getZoom(), 19), {animate:false});
-    }
-    const pts = currentWall.points;
-    // Le PREMIER point appartient à l'utilisateur : il le pose à la cible,
-    // après avoir affiné la position. Aucun auto-ajout avant cela.
-    if(pts.length > 0){
-      const last = pts[pts.length-1];
-      // auto-ajout si distance > 4m : chaque point est relié au précédent
-      if(haversine(last.lat,last.lon,latitude,longitude) > 4){
-        pts.push({lat:latitude, lon:longitude, acc:accuracy, t:Date.now(), manual:false});
-        refreshPointCount();
-      }
     }
   }, err=>{
     updateGpsStatus(false);
@@ -2505,5 +2495,4 @@ runGpsDiagnostic();
 offerDraftRecovery();
 </script>
 </body>
-</html>
-</html>
+  </html>
