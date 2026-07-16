@@ -141,6 +141,20 @@
     border-top:1px solid var(--filet);padding:10px 16px 16px 16px;z-index:30;}
   .footer-actions-inner{max-width:488px;margin:0 auto;}
 
+  /* Compteur de synthèse (inventaire) */
+  .stats-box{background:var(--parchemin);border:1px solid var(--filet);border-radius:10px;
+             padding:12px 14px;margin-bottom:12px;}
+  .stats-box .stats-title{font-size:10px;letter-spacing:1px;text-transform:uppercase;
+             color:var(--olive-moyen);font-weight:bold;margin-bottom:10px;}
+  .stats-grid{display:flex;gap:8px;}
+  .stat{flex:1;text-align:center;}
+  .stat .num{font-size:19px;font-weight:bold;color:var(--olive-profond);line-height:1.1;}
+  .stat .lab{font-size:9.5px;color:var(--pierre);opacity:.75;margin-top:3px;}
+  .stats-bar{display:flex;height:7px;border-radius:4px;overflow:hidden;margin-top:11px;
+             background:var(--filet);}
+  .stats-bar span{display:block;height:100%;}
+  .stats-legend{display:flex;gap:12px;flex-wrap:wrap;margin-top:7px;font-size:9.5px;color:var(--pierre);}
+  .stats-legend i{display:inline-block;width:8px;height:8px;border-radius:2px;margin-right:4px;}
   .export-bar{display:flex;gap:8px;margin-top:10px;}
   .export-bar .btn-small{flex:1;text-align:center;}
 
@@ -366,6 +380,7 @@
       </div>
       <input type="file" id="importInput" accept=".geojson,.json,application/geo+json,application/json" style="display:none;" onchange="importGeoJSON(event)">
       <div id="importSummary"></div>
+      <div id="statsBox"></div>
       <div id="invList"></div>
       <div id="invEmpty" class="empty-state" style="display:none;">
         <div class="big">📋</div>
@@ -2297,7 +2312,72 @@ function escapeXml(s){
 
 
 /* ============ INVENTAIRE ============ */
+/* ============ COMPTEUR DE SYNTHÈSE ============ */
+
+/* Longueur retenue d'un mur : la valeur saisie/corrigée si elle existe,
+   sinon la longueur du tracé GPS. Renvoie 0 si rien n'est exploitable. */
+function wallLength(w){
+  if(w.longueur && !isNaN(w.longueur)) return parseFloat(w.longueur);
+  if(w.points && w.points.length >= 2) return trackLength(w.points);
+  return 0;
+}
+
+function renderStats(){
+  const box = document.getElementById('statsBox');
+  if(!box) return;
+  if(walls.length === 0){ box.innerHTML = ''; return; }
+
+  const conf = walls.filter(w=>w.statut !== 'candidat');
+  const cand = walls.filter(w=>w.statut === 'candidat');
+
+  // Longueurs : on ne compte que les murs confirmés (les candidats ne sont pas relevés).
+  let total = 0;
+  const parEtat = {bon:0, degrade:0, ruine:0};
+  let sansEtat = 0;
+
+  conf.forEach(w=>{
+    const wm = migrateWall(w);
+    const len = wallLength(wm);
+    total += len;
+    const segs = wm.segments || [];
+    const known = segs.filter(s=>s && s.etat);
+    if(known.length === 0){ sansEtat += len; return; }
+    // longueur répartie à parts égales entre les tronçons dont l'état est renseigné
+    const part = len / known.length;
+    known.forEach(s=> parEtat[s.etat] += part);
+    sansEtat += len * ((segs.length - known.length) / (segs.length || 1));
+  });
+
+  const m = v => v >= 1000 ? (v/1000).toFixed(2)+' km' : Math.round(v)+' m';
+  const pct = v => total > 0 ? (v/total*100) : 0;
+
+  box.innerHTML = `
+    <div class="stats-box">
+      <div class="stats-title">Synthèse de l'inventaire</div>
+      <div class="stats-grid">
+        <div class="stat"><div class="num">${m(total)}</div><div class="lab">longueur relevée</div></div>
+        <div class="stat"><div class="num">${conf.length}</div><div class="lab">murs relevés</div></div>
+        <div class="stat"><div class="num">${conf.reduce((n,w)=>n+((migrateWall(w).segments||[]).length),0)}</div><div class="lab">tronçons</div></div>
+        <div class="stat"><div class="num">${cand.length}</div><div class="lab">à vérifier</div></div>
+      </div>
+      ${total > 0 ? `
+      <div class="stats-bar">
+        <span style="width:${pct(parEtat.bon)}%;background:var(--bon);"></span>
+        <span style="width:${pct(parEtat.degrade)}%;background:var(--degrade);"></span>
+        <span style="width:${pct(parEtat.ruine)}%;background:var(--ruine);"></span>
+        <span style="width:${pct(sansEtat)}%;background:var(--filet);"></span>
+      </div>
+      <div class="stats-legend">
+        <span><i style="background:var(--bon);"></i>Bon ${m(parEtat.bon)}</span>
+        <span><i style="background:var(--degrade);"></i>Dégradé ${m(parEtat.degrade)}</span>
+        <span><i style="background:var(--ruine);"></i>Ruiné ${m(parEtat.ruine)}</span>
+        ${sansEtat > 1 ? `<span><i style="background:var(--filet);"></i>Non renseigné ${m(sansEtat)}</span>` : ''}
+      </div>` : ''}
+    </div>`;
+}
+
 function renderInventory(){
+  renderStats();
   const list = document.getElementById('invList');
   const empty = document.getElementById('invEmpty');
   const nbCand = walls.filter(w=>w.statut==='candidat').length;
